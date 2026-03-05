@@ -5,12 +5,13 @@
 #include "log.h"
 
 const char* logFilePath = "/log.txt";
-const size_t maxLogFileSize = 4096 * 10; // 40KB max log size, adjust as needed
-bool isWebSerialStarted = false;
+const char* logTempPath = "/log_tmp.txt";
+const size_t maxLogFileSize = 1024 * 100; // 100KB max log size
+const size_t truncateTarget = maxLogFileSize * 3 / 4; // Truncate to 75% capacity
 
 void initiateLog() {
     if (!LittleFS.begin()) {
-        WebSerial.println("[LOG] LittleFS mount failed");
+        Serial.println("[LOG] LittleFS mount failed");
         return;
     }
     if (!LittleFS.exists(logFilePath)) {
@@ -19,7 +20,7 @@ void initiateLog() {
             logFile.println("[LOG] log initiated!");
             logFile.close();
         }
-    } 
+    }
     else {
         File logFile = LittleFS.open(logFilePath, "a");
         if (logFile) {
@@ -39,7 +40,7 @@ String getTimestamp() {
 
     snprintf(
         buffer,
-        sizeof(buffer), 
+        sizeof(buffer),
         "%02d.%02d.%04d %02d:%02d:%02d.%03lu",
         timeinfo.tm_mday,
         timeinfo.tm_mon + 1,
@@ -56,7 +57,7 @@ String getTimestamp() {
 void truncateLogIfNeeded() {
     File logFile = LittleFS.open(logFilePath, "r");
     if (!logFile) {
-        WebSerial.println("[LOG] Failed to open log file for truncation check");
+        Serial.println("[LOG] Failed to open log file for truncation check");
         return;
     }
 
@@ -66,39 +67,53 @@ void truncateLogIfNeeded() {
         return;
     }
 
-    // Read entire log file into memory
-    String logContent = logFile.readString();
-    logFile.close();
+    // Skip oldest bytes to keep truncateTarget worth of data
+    size_t skipBytes = fileSize - truncateTarget;
+    logFile.seek(skipBytes);
 
-    // Remove oldest lines until size is below half of maxLogFileSize
-    int removeUntil = logContent.length() - (maxLogFileSize / 2);
-    int firstNewlinePos = logContent.indexOf('\n', removeUntil);
-    if (firstNewlinePos != -1) {
-        logContent = logContent.substring(firstNewlinePos + 1);
-    } else {
-        // If no newline found, clear log
-        logContent = "";
+    // Read forward to the next newline to avoid a partial line
+    char buf[256];
+    size_t bytesRead = logFile.readBytes(buf, sizeof(buf));
+    size_t newlineOffset = 0;
+    for (size_t i = 0; i < bytesRead; i++) {
+        if (buf[i] == '\n') {
+            newlineOffset = i + 1;
+            break;
+        }
     }
 
-    // Rewrite truncated log
-    logFile = LittleFS.open(logFilePath, "w");
-    if (!logFile) {
-        WebSerial.println("[LOG] Failed to open log file for truncation");
+    // Position at first complete line after skip
+    size_t copyFrom = skipBytes + newlineOffset;
+    logFile.seek(copyFrom);
+
+    // Copy remaining data to temp file using fixed buffer (no heap String)
+    File tmpFile = LittleFS.open(logTempPath, "w");
+    if (!tmpFile) {
+        logFile.close();
+        Serial.println("[LOG] Failed to create temp file for truncation");
         return;
     }
-    logFile.println("[LOG] Log truncated due to size limit");
-    logFile.print(logContent);
-    logFile.close();
-}
 
-void announceWebSerialReady() {
-    isWebSerialStarted = true;
+    tmpFile.println("--- Older entries removed due to size limit ---");
+
+    while (logFile.available()) {
+        size_t n = logFile.readBytes(buf, sizeof(buf));
+        tmpFile.write((uint8_t*)buf, n);
+    }
+
+    logFile.close();
+    tmpFile.close();
+
+    // Replace original with truncated version
+    LittleFS.remove(logFilePath);
+    LittleFS.rename(logTempPath, logFilePath);
 }
 
 void logMessage(const String& message) {
     String timestampedMessage = "[" + getTimestamp() + "] " + message;
-    if (isWebSerialStarted) {
-        WebSerial.println(timestampedMessage); // Print to WebSerial for real-time monitoring
+
+    if (WiFi.status() == WL_CONNECTED) {
+        WebSerial.println(timestampedMessage);
     }
 
     if (Serial) {
@@ -108,8 +123,8 @@ void logMessage(const String& message) {
     truncateLogIfNeeded();
 
     File logFile = LittleFS.open(logFilePath, "a");
-    if (!logFile && isWebSerialStarted) {
-        WebSerial.println("[LOG] Failed to open log file");
+    if (!logFile) {
+        Serial.println("[LOG] Failed to open log file");
         return;
     }
     logFile.println(timestampedMessage);
@@ -124,5 +139,5 @@ String readLog() {
 
     String logContent = logFile.readString();
     logFile.close();
-    return logFile ? logFile.readString() : "[LOG] Log file empty or unreadable";
+    return logContent;
 }

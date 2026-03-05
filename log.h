@@ -11,8 +11,6 @@ void          initiateLog  ();
 
 void          truncateLogIfNeeded ();
 
-void          announceWebSerialReady ();
-
 void          logMessage (const String& message);
 
 String        readLog();
